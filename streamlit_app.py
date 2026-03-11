@@ -6,7 +6,11 @@ import requests
 import streamlit as st
 
 
-st.set_page_config(page_title="Dify Lookbook Generator", page_icon="🎭", layout="centered")
+st.set_page_config(
+    page_title="Dify Lookbook Generator",
+    page_icon="🎭",
+    layout="centered",
+)
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -28,25 +32,25 @@ def get_headers() -> dict:
 
 def upload_file_to_dify(uploaded_file, user_id: str) -> dict:
     """
-    Dify: POST /files/upload
+    上传文件到 Dify /files/upload
+    Dify 工作流文件上传接口要求:
+    - multipart/form-data
+    - file
+    - user
     """
-    if not DIFY_BASE_URL or not DIFY_API_KEY:
-        raise ValueError("缺少 DIFY_BASE_URL 或 DIFY_API_KEY secrets。")
-
-    url = f"{DIFY_BASE_URL}/files/upload"
-
-    file_bytes = uploaded_file.getvalue()
-    mime_type = uploaded_file.type or "application/pdf"
-
     files = {
-        "file": (uploaded_file.name, file_bytes, mime_type),
+        "file": (
+            uploaded_file.name,
+            uploaded_file.getvalue(),
+            "application/pdf",
+        )
     }
     data = {
         "user": user_id,
     }
 
     resp = requests.post(
-        url,
+        f"{DIFY_BASE_URL}/files/upload",
         headers=get_headers(),
         files=files,
         data=data,
@@ -56,162 +60,132 @@ def upload_file_to_dify(uploaded_file, user_id: str) -> dict:
     return resp.json()
 
 
-def run_workflow(file_id: str, user_id: str, count: int) -> dict:
+def run_workflow(upload_file_id: str, count: int, user_id: str) -> dict:
     """
-    Dify: POST /workflows/run
-    这里默认你的工作流输入变量名是:
-    - pdf_doc
-    - count
+    执行 Dify 工作流 /workflows/run
 
-    如果你在 Dify 的 Access API 里看到变量名不同，只改 inputs 这里即可。
+    这里假设你的开始节点里:
+    - pdf_doc 是 File 类型（单文件）
+    - count 是 Number 类型
     """
-    if not DIFY_BASE_URL or not DIFY_API_KEY:
-        raise ValueError("缺少 DIFY_BASE_URL 或 DIFY_API_KEY secrets。")
-
-    url = f"{DIFY_BASE_URL}/workflows/run"
-
     payload = {
         "inputs": {
-            "count": int(count),
-            "pdf_doc": [
-                {
-                    "type": "document",
-                    "transfer_method": "local_file",
-                    "upload_file_id": file_id,
-                }
-            ],
+            "count": count,
+            "pdf_doc": {
+                "transfer_method": "local_file",
+                "upload_file_id": upload_file_id,
+                "type": "document",
+            },
         },
         "response_mode": "blocking",
         "user": user_id,
     }
 
     resp = requests.post(
-        url,
+        f"{DIFY_BASE_URL}/workflows/run",
         headers={
             **get_headers(),
             "Content-Type": "application/json",
         },
-        data=json.dumps(payload),
-        timeout=120,
+        json=payload,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def extract_outputs(workflow_resp: dict) -> Any:
-    """
-    尽量把 Dify 返回的 outputs 提取出来显示
-    """
-    if not isinstance(workflow_resp, dict):
-        return workflow_resp
-
-    data = workflow_resp.get("data", {})
-    if isinstance(data, dict) and "outputs" in data:
-        return data.get("outputs")
-
-    return workflow_resp
-
-
-def try_extract_filenames(outputs: Any) -> list[str]:
-    result = []
-
-    def walk(x):
-        if isinstance(x, dict):
-            for k, v in x.items():
-                if k.lower() in {"file_name", "filename"} and isinstance(v, str):
-                    result.append(v)
-                else:
-                    walk(v)
-        elif isinstance(x, list):
-            for item in x:
-                walk(item)
-
-    walk(outputs)
-    return result
-
-
-st.title("🎭 Dify Lookbook Generator")
-st.caption("上传 PDF Lookbook，调用 Dify 工作流生成角色图。")
-
-with st.expander("使用说明", expanded=False):
-    st.markdown(
-        """
-1. 上传一个 PDF 文件  
-2. 设置生成数量 count  
-3. 点击“开始生成”  
-4. 页面会展示 Dify 返回结果  
-
-**注意**  
-- 需要在 Streamlit Secrets 中配置：
-  - `DIFY_BASE_URL`
-  - `DIFY_API_KEY`
-- 本示例默认你的 Dify 工作流输入变量名为：
-  - `pdf_doc`
-  - `count`
-        """
+def pretty_json(data: Any):
+    st.code(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        language="json",
     )
 
-uploaded_file = st.file_uploader(
-    "上传 Lookbook PDF",
-    type=["pdf"],
-    accept_multiple_files=False,
-)
 
-count = st.number_input("count", min_value=1, max_value=100, value=8, step=1)
+def main():
+    st.title("🎭 Dify Lookbook Generator")
+    st.caption("上传 PDF Lookbook，调用 Dify 工作流生成角色图。")
 
-if "user_id" not in st.session_state:
-    st.session_state.user_id = f"streamlit-{uuid.uuid4().hex[:12]}"
-
-st.text_input("当前会话 user_id", value=st.session_state.user_id, disabled=True)
-
-run_button = st.button("开始生成", type="primary", use_container_width=True)
-
-if run_button:
-    if not uploaded_file:
-        st.error("请先上传 PDF。")
-        st.stop()
+    with st.expander("使用说明"):
+        st.markdown(
+            """
+1. 上传一个 PDF Lookbook 文件  
+2. 设置 `count` 数量  
+3. 点击 **开始生成**  
+4. 页面会先上传 PDF 到 Dify，再触发你的工作流  
+5. 结果以 Dify 工作流返回为准
+            """
+        )
 
     if not DIFY_BASE_URL or not DIFY_API_KEY:
-        st.error("请先在 Streamlit Secrets 中配置 DIFY_BASE_URL 和 DIFY_API_KEY。")
+        st.error("缺少 Dify 配置。请先在 Streamlit Secrets 中填写 DIFY_BASE_URL 和 DIFY_API_KEY。")
         st.stop()
 
-    user_id = st.session_state.user_id
+    uploaded_file = st.file_uploader(
+        "上传 Lookbook PDF",
+        type=["pdf"],
+        accept_multiple_files=False,
+    )
 
-    try:
-        with st.spinner("正在上传文件到 Dify..."):
-            upload_resp = upload_file_to_dify(uploaded_file, user_id)
-            file_id = upload_resp["id"]
+    count = st.number_input(
+        "count",
+        min_value=1,
+        max_value=50,
+        value=8,
+        step=1,
+    )
 
-        st.success("文件上传成功。")
-        st.json(upload_resp, expanded=False)
+    if "streamlit_user_id" not in st.session_state:
+        st.session_state["streamlit_user_id"] = f"streamlit-{uuid.uuid4().hex[:12]}"
 
-        with st.spinner("正在执行 Dify 工作流..."):
-            workflow_resp = run_workflow(file_id, user_id, int(count))
+    user_id = st.text_input(
+        "当前会话 user_id",
+        value=st.session_state["streamlit_user_id"],
+        disabled=True,
+    )
 
-        st.success("工作流执行完成。")
+    if st.button("开始生成", use_container_width=True, type="primary"):
+        if uploaded_file is None:
+            st.error("请先上传 PDF 文件。")
+            st.stop()
 
-        st.subheader("工作流原始返回")
-        st.json(workflow_resp, expanded=False)
-
-        outputs = extract_outputs(workflow_resp)
-
-        st.subheader("提取后的 outputs")
-        st.json(outputs, expanded=True)
-
-        filenames = try_extract_filenames(outputs)
-        if filenames:
-            st.subheader("识别到的文件名")
-            for name in filenames:
-                st.write(f"- {name}")
-
-    except requests.HTTPError as e:
-        body = ""
         try:
-            body = e.response.text
-        except Exception:
-            pass
-        st.error(f"HTTP 请求失败：{e}")
-        if body:
-            st.code(body)
-    except Exception as e:
-        st.exception(e)
+            with st.spinner("正在上传文件到 Dify..."):
+                upload_result = upload_file_to_dify(uploaded_file, user_id)
+
+            st.success("文件上传成功。")
+            pretty_json(upload_result)
+
+            upload_file_id = upload_result.get("id")
+            if not upload_file_id:
+                st.error("Dify 上传返回里没有拿到文件 id。")
+                st.stop()
+
+            with st.spinner("正在触发工作流..."):
+                workflow_result = run_workflow(
+                    upload_file_id=upload_file_id,
+                    count=int(count),
+                    user_id=user_id,
+                )
+
+            st.success("工作流触发成功。")
+            pretty_json(workflow_result)
+
+            data = workflow_result.get("data", {})
+            outputs = data.get("outputs")
+
+            if outputs is not None:
+                st.subheader("工作流输出")
+                pretty_json(outputs)
+
+        except requests.HTTPError as e:
+            st.error(f"HTTP 请求失败：{e}")
+            try:
+                st.code(e.response.text, language="json")
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"运行失败：{e}")
+
+
+if __name__ == "__main__":
+    main()
